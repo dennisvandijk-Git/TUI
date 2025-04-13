@@ -55,7 +55,7 @@ function Get-DisabledADUsers {
     # Get all disabled AD users in the specified OU
     $disabledUsers = Get-ADUser -Filter { Enabled -eq $false } -SearchBase $OUStandaard -Properties LastLogonDate
 
-    # Iterate through disabled users and fetch replication metadata
+    # Iterate through disabled users
     $metadata = foreach ($user in $disabledUsers) {
         $metadataEntry = Get-ADReplicationAttributeMetadata -Object $user.DistinguishedName -Server (Get-ADDomainController).HostName
         $disableMetadata = $metadataEntry | Where-Object { $_.AttributeName -eq "userAccountControl" }
@@ -68,10 +68,12 @@ function Get-DisabledADUsers {
         }
     }
 
-    # Sort the results by LastDisabledTime in descending order and display
+    # Sort data
     # $metadata | Sort-Object LastDisabledTime -Descending | Format-Table -Wrap
     $metadata | Sort-Object LastDisabledTime -Descending | Out-GridView -PassThru -Title "Enable one/multiple AD Accounts" | `
         ForEach-Object { Enable-ADAccount -Identity $_.UserName -Confirm }
+
+    Invoke-Command -ComputerName "VMADCONNECT-P1" -ConfigurationName "JEA_ADConnect" -ScriptBlock { Start-ADSyncSyncCycle -PolicyType Delta }
 
 }
 function Show-SearchMenu {
@@ -93,8 +95,8 @@ function Show-SearchMenu {
                 Pause
             }
             '3' {
-                $passExpiredAccounts = Search-ADAccount -PasswordExpired | Select-Object Name, ObjectClass
-                $passExpiredAccounts | Format-Table -AutoSize
+                Get-ADUser -Filter * -Properties PasswordExpired, LastLogonDate -SearchBase $OUStandaard | Where-Object PasswordExpired -eq  true | Select-Object Name, PasswordExpired, LastLogonDate | `
+                    Sort-Object -Property LastLogonDate -Descending | Format-Table
                 Pause
             }
             '4' { return }
@@ -218,12 +220,24 @@ function Search-User {
                     catch {
                         Write-Host "`nErrorMessage: $_."
                     }
-                    # Pause
+                    Pause
                 }
                 '2' { Get-ADGroupsOfUser }
-                '3' { Unlock-ADAccount -Identity $selectedUser.SamAccountName }
-                '4' { Enable-ADAccount -Identity $selectedUser.SamAccountName }
-                '5' { Disable-ADAccount -Identity $selectedUser.SamAccountName }
+                '3' {
+                    Unlock-ADAccount -Identity $selectedUser.SamAccountName
+                    Invoke-Command -ComputerName "VMADCONNECT-P1" -ConfigurationName "JEA_ADConnect" -ScriptBlock { Start-ADSyncSyncCycle -PolicyType Delta }
+                    Start-Sleep -Seconds 2
+                }
+                '4' {
+                    Enable-ADAccount -Identity $selectedUser.SamAccountName
+                    Invoke-Command -ComputerName "VMADCONNECT-P1" -ConfigurationName "JEA_ADConnect" -ScriptBlock { Start-ADSyncSyncCycle -PolicyType Delta }
+                    Start-Sleep -Seconds 2 
+                }
+                '5' {
+                    Disable-ADAccount -Identity $selectedUser.SamAccountName
+                    Invoke-Command -ComputerName "VMADCONNECT-P1" -ConfigurationName "JEA_ADConnect" -ScriptBlock { Start-ADSyncSyncCycle -PolicyType Delta }
+                    Start-Sleep -Seconds 2 
+                }
                 '6' {
                     Get-ADGroup -Filter * -Properties Name, Description | `
                         Select-Object Name, Description | Out-GridView -PassThru -Title "Add AD Groups - multiple select possible (ctrl+leftMouseClick) or (ctrl+A) for all" | `
@@ -278,13 +292,23 @@ function Show-UserDetails {
             # Iterate through each property and align the output
             $_.PSObject.Properties | ForEach-Object { 
                 $formattedName = $_.Name.PadRight($maxLength)  # Pad property name to max length
-                Write-Host " ${formattedName} : $($_.Value)"
-
+                $value = $_.Value
+                # Output EU format
+                if ($value -is [datetime]) {
+                    Write-Host " ${formattedName} : $($value.ToString("dd/MM/yyyy HH:mm:ss"))"
+                }
+                else {
+                    Write-Host " ${formattedName} : $value"
+                }
             }
-            
             if ($userDetails.PasswordExpired -eq $true) {
-                $expiresOn = $userDetails.PasswordLastSet.AddDays($days)
-                $expiresOverDays = $expiresOn.Subtract($(Get-Date))
+                if ($null -eq $userDetails.PasswordLastSet) {
+                    $expiresOn = "`"User must change password at next logon is set`""
+                }
+                else {
+                    $expiresOn = $userDetails.PasswordLastSet.AddDays($days)
+                    $expiresOverDays = $expiresOn.Subtract($(Get-Date))
+                }
                 Write-Host " PasswordExpired        : " -NoNewline
                 Write-Host -ForegroundColor Red "$($userDetails.PasswordExpired)" -NoNewline
                 Write-Host " (Expired on: $($expiresOn))"
@@ -295,7 +319,7 @@ function Show-UserDetails {
                 $expiresOverDays = $expiresOverDays.ToString("dd'd:'hh'h:'mm'm:'ss's'")
                 Write-Host " PasswordExpired        : " -NoNewline
                 Write-Host -ForegroundColor Green "$($userDetails.PasswordExpired)" -NoNewline
-                Write-Host " (Expires on: $($expiresOn) - $($expiresOverDays) remaining)"
+                Write-Host " (Expires on: $($expiresOn.ToString("dd/MM/yyyy HH:mm:ss")) - $($expiresOverDays) remaining)"
             }
             if ($userDetails.LockedOut -eq $false) {
                 Write-Host " LockedOut              : " -NoNewline
@@ -304,7 +328,7 @@ function Show-UserDetails {
             else {
                 Write-Host " LockedOut              : " -NoNewline
                 Write-Host -ForegroundColor Red "$($userDetails.LockedOut)" -NoNewline
-                Write-Host " (LockoutTime: $($userDetails.AccountLockoutTime))"
+                Write-Host " (LockoutTime: $($userDetails.AccountLockoutTime.ToString("dd/MM/yyyy HH:mm:ss")))"
             }
             if ($userDetails.Enabled -eq $true) {
                 Write-Host " Enabled                : " -NoNewline
@@ -324,7 +348,7 @@ function Show-UserDetails {
 function Get-ADGroupsOfUser {
     # "`n"
     $userGroups = Get-ADUser -Identity $selectedUser.SamAccountName -Properties MemberOf | Select-Object -ExpandProperty MemberOf
-    $groupMembers = $userGroups | ForEach-Object { (Get-ADGroup $_).Name }
+    $groupMembers = $userGroups | ForEach-Object { (Get-ADGroup $_).Name } | Sort-Object
     if ($groupMembers) {
         # Write-Host ((═ * 10) + " MemberOf " + (═ * 10))
         Write-Host ("╔" + ("═" * 30) + "╗")
