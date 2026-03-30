@@ -1,10 +1,10 @@
-﻿$xml = [xml](Get-Content "C:\Scripts\Show-Menu\CONFIG.XML")
+$xml = [xml](Get-Content "\\path\CONFIG.XML")
 
 # Dynamic variables from XML
 $xml.Values.ChildNodes | ForEach-Object {
     $Name = $_.Name
     $Value = $_.InnerText
-    New-Variable -Name $Name -Value $Value 
+    New-Variable -Name $Name -Value $Value
 }
 
 function New-Menu {
@@ -18,7 +18,7 @@ function New-Menu {
 
     # Calculate the longest option length
     $longestOption = ($options | Sort-Object -Property Length -Descending | Select-Object -First 1).Length
-    $barLength = [math]::Max($longestOption, $title.Length) + 5 
+    $barLength = [math]::Max($longestOption, $title.Length) + 5
 
     # Center the title in the top bar
     $paddingTotal = $barLength - $title.Length
@@ -59,7 +59,7 @@ function Get-DisabledADUsers {
     $metadata = foreach ($user in $disabledUsers) {
         $metadataEntry = Get-ADReplicationAttributeMetadata -Object $user.DistinguishedName -Server (Get-ADDomainController).HostName
         $disableMetadata = $metadataEntry | Where-Object { $_.AttributeName -eq "userAccountControl" }
-    
+
         [PSCustomObject]@{
             Name               = $user.Name
             UserName           = $user.SamAccountName
@@ -73,7 +73,7 @@ function Get-DisabledADUsers {
     $metadata | Sort-Object LastDisabledTime -Descending | Out-GridView -PassThru -Title "Enable one/multiple AD Accounts" | `
         ForEach-Object { Enable-ADAccount -Identity $_.UserName -Confirm }
 
-    Invoke-Command -ComputerName "VMADCONNECT-P1" -ConfigurationName "JEA_ADConnect" -ScriptBlock { Start-ADSyncSyncCycle -PolicyType Delta }
+    Invoke-Command -ComputerName $entraConServer -ConfigurationName $entraConConfig -ScriptBlock { Start-ADSyncSyncCycle -PolicyType Delta } -UseSSL
 
 }
 function Show-SearchMenu {
@@ -105,7 +105,7 @@ function Show-SearchMenu {
     }
 }
 function Show-SubMenuSearchGroup {
-    
+
     while ($true) {
         New-Menu -title "Sub Menu" -options @("Search Group", "Back") -defaultIndex 2
         $value = Read-Host "Enter your choice, (default is `"2`")"
@@ -115,6 +115,33 @@ function Show-SubMenuSearchGroup {
             }
             # Exit Option
             "2" { return }
+            # Default
+            Default {
+                return
+            }
+        }
+    }
+}
+function Show-SubMenuSearchGroup {
+
+    while ($true) {
+        New-Menu -title "Sub Menu" -options @("Search Group", "Get GroupMembers", "Back") -defaultIndex 3
+        $value = Read-Host "Enter your choice, (default is `"3`")"
+        switch ($value) {
+            "1" {
+                Search-ADGroup
+            }
+            "2" {
+                $group = Search-ADGroup | Out-GridView -PassThru
+
+                # $group | foreach { Get-ADGroupMember $_.Name | Select-Object Name }
+                $groupMemberz = $group | ForEach-Object { Get-ADGroupMember $_.Name | ForEach-Object { Get-ADUser -Identity $_ } | Select-Object Name, UserPrincipalName }
+                $groupMemberz | Out-Default
+                "GroupName: {0}" -f $group.Name
+                "GroupMembersCount: {0}" -f $groupMemberz.Count
+            }
+            # Exit Option
+            "3" { return }
             # Default
             Default {
                 return
@@ -137,8 +164,8 @@ function Search-ADGroup {
             Write-Host -ForegroundColor Red "Please try again, input was empty."
         }
         else {
-            Get-ADGroup -Filter $filter -Properties Name, Description | Select-Object Name, Description | Format-Table -Wrap
-            Pause
+            Get-ADGroup -Filter $filter -Properties Name, Description | Select-Object Name, Description
+            # Pause
         }
     }
 }
@@ -148,7 +175,7 @@ function Reset-Password {
     Write-Host "`nTijdelijk wachtwoord is: $($string)"
     Set-ADAccountPassword -Identity $selectedUser.SamAccountName -Reset -NewPassword (ConvertTo-SecureString -AsPlainText $string -Force) -Confirm
     try {
-        Invoke-Command -ComputerName "VMADCONNECT-P1" -ConfigurationName "JEA_ADConnect" -ScriptBlock { Start-ADSyncSyncCycle -PolicyType Delta }
+        Invoke-Command -ComputerName $entraConServer -ConfigurationName $entraConConfig -ScriptBlock { Start-ADSyncSyncCycle -PolicyType Delta } -UseSSL
     }
     catch {
         Write-Error $_
@@ -192,7 +219,7 @@ function Search-User {
         $selectedIndex = ""
         while ($selectedIndex -eq "" -or $selectedIndex -notmatch '^\d+$' -or [int]$selectedIndex -lt 1 -or [int]$selectedIndex -gt $results.Count) {
             $selectedIndex = Read-Host "`nEnter the number of the user you want more details about, or (enter) to return."
-            
+
             if ($selectedIndex -eq "") {
                 Clear-Host
                 Show-SubMenuSearchUser
@@ -210,7 +237,7 @@ function Search-User {
 
         while ($true) {
             Show-UserDetails $selectedUser.SamAccountName
-            New-Menu -options @("Reset Password", "Get AD Groups", "Unlock Account", "Enable Account", "Disable Account", "Add AD Groups", "Remove AD Groups", "Back") -defaultIndex 8
+            New-Menu -options @("Reset Password", "Get AD Groups", "Unlock Account", "Enable Account", "Disable Account", "Add AD Groups", "Remove AD Groups", "Entra Sync", "Back") -defaultIndex 9
             $value = Read-Host "Make a selection, (default is `"8`")"
             switch ($value) {
                 '1' {
@@ -225,37 +252,42 @@ function Search-User {
                 '2' { Get-ADGroupsOfUser }
                 '3' {
                     Unlock-ADAccount -Identity $selectedUser.SamAccountName
-                    Invoke-Command -ComputerName "VMADCONNECT-P1" -ConfigurationName "JEA_ADConnect" -ScriptBlock { Start-ADSyncSyncCycle -PolicyType Delta }
+                    Invoke-Command -ComputerName $entraConServer -ConfigurationName $entraConConfig -ScriptBlock { Start-ADSyncSyncCycle -PolicyType Delta } -UseSSL
                     Start-Sleep -Seconds 2
                 }
                 '4' {
                     Enable-ADAccount -Identity $selectedUser.SamAccountName
-                    Invoke-Command -ComputerName "VMADCONNECT-P1" -ConfigurationName "JEA_ADConnect" -ScriptBlock { Start-ADSyncSyncCycle -PolicyType Delta }
-                    Start-Sleep -Seconds 2 
+                    Invoke-Command -ComputerName $entraConServer -ConfigurationName $entraConConfig -ScriptBlock { Start-ADSyncSyncCycle -PolicyType Delta } -UseSSL
+                    Start-Sleep -Seconds 2
                 }
                 '5' {
                     Disable-ADAccount -Identity $selectedUser.SamAccountName
-                    Invoke-Command -ComputerName "VMADCONNECT-P1" -ConfigurationName "JEA_ADConnect" -ScriptBlock { Start-ADSyncSyncCycle -PolicyType Delta }
-                    Start-Sleep -Seconds 2 
+                    Invoke-Command -ComputerName $entraConServer -ConfigurationName $entraConConfig -ScriptBlock { Start-ADSyncSyncCycle -PolicyType Delta } -UseSSL
+                    Start-Sleep -Seconds 2
                 }
                 '6' {
                     Get-ADGroup -Filter * -Properties Name, Description | `
                         Select-Object Name, Description | Out-GridView -PassThru -Title "Add AD Groups - multiple select possible (ctrl+leftMouseClick) or (ctrl+A) for all" | `
-                        ForEach-Object { Add-ADGroupMember -Identity $_.Name -Members $selectedUser.SamAccountName -Confirm } 
+                        ForEach-Object { Add-ADGroupMember -Identity $_.Name -Members $selectedUser.SamAccountName -Confirm }
+                    Invoke-Command -ComputerName $entraConServer -ConfigurationName $entraConConfig -ScriptBlock { Start-ADSyncSyncCycle -PolicyType Delta } -UseSSL
                 }
                 '7' {
                     Get-ADUser -Identity $selectedUser.SamAccountName -Properties MemberOf | Select-Object -ExpandProperty MemberOf | `
                         ForEach-Object { Get-ADGroup $_ -Properties Name, Description } | Select-Object Name, Description | `
                         Out-GridView -PassThru -Title "Remove AD Groups - multiple select possible (ctrl+leftMouseClick) or (ctrl+A) for all" | `
-                        ForEach-Object { Remove-ADGroupMember -Identity $_.Name -Members $selectedUser.SamAccountName -Confirm } 
+                        ForEach-Object { Remove-ADGroupMember -Identity $_.Name -Members $selectedUser.SamAccountName -Confirm }
+                    Invoke-Command -ComputerName $entraConServer -ConfigurationName $entraConConfig -ScriptBlock { Start-ADSyncSyncCycle -PolicyType Delta } -UseSSL
                 }
                 '8' {
+                    Invoke-Command -ComputerName $entraConServer -ConfigurationName $entraConConfig -ScriptBlock { Start-ADSyncSyncCycle -PolicyType Delta } -UseSSL
+                }
+                '9' {
                     Clear-Host
-                    Show-SubMenuSearchUser 
+                    Show-SubMenuSearchUser
                 }
                 Default {
                     Clear-Host
-                    Show-SubMenuSearchUser 
+                    Show-SubMenuSearchUser
                 }
             }
         }
@@ -282,15 +314,15 @@ function Show-UserDetails {
         $domainPasswordPolicy = (Get-ADDefaultDomainPasswordPolicy).MaxPasswordAge
         $days = $domainPasswordPolicy.Days
 
-        $userDetails | 
-        Select-Object Name, SamAccountName, EmailAddress, Title, Department, Office, telephoneNumber, Manager, LastLogonDate, LastBadPasswordAttempt, PasswordLastSet | 
+        $userDetails |
+        Select-Object Name, SamAccountName, EmailAddress, Title, Department, Office, telephoneNumber, Manager, DistinguishedName, LastLogonDate, LastBadPasswordAttempt, PasswordLastSet |
         ForEach-Object {
             # Get all property names and calculate the maximum length
             $propertyNames = $_.PSObject.Properties.Name
             $maxLength = ($propertyNames | ForEach-Object { $_.Length } | Measure-Object -Maximum).Maximum
-        
+
             # Iterate through each property and align the output
-            $_.PSObject.Properties | ForEach-Object { 
+            $_.PSObject.Properties | ForEach-Object {
                 $formattedName = $_.Name.PadRight($maxLength)  # Pad property name to max length
                 $value = $_.Value
                 # Output EU format
@@ -338,7 +370,7 @@ function Show-UserDetails {
                 Write-Host " Enabled                : " -NoNewline
                 Write-Host -ForegroundColor Red "$($userDetails.Enabled)"
             }
-        }    
+        }
         Write-Host ("═" * 42)
     }
     else {
@@ -361,7 +393,7 @@ function Get-ADGroupsOfUser {
     }
     "`n"
     Pause
-} 
+}
 function Get-ADUserInfo {
     param(
         [string[]] $user
@@ -375,10 +407,10 @@ function Get-ADUserInfo {
     $filter = "Name -like '$searchTerm' -or SamAccountName -like '$searchTerm' -or UserPrincipalName -like '$searchTerm'"
 
     Get-ADUser -Filter $filter -Properties * | Select-Object Name, AccountLockoutTime, BadLogonCount, DistinguishedName, EmailAddress, Enabled, LockedOut,
-    GivenName, HomeDirectory, HomeDrive, LastBadPasswordAttempt, LastLogonDate, LastPasswordSet, 
+    GivenName, HomeDirectory, HomeDrive, LastBadPasswordAttempt, LastLogonDate, LastPasswordSet,
     PasswordExpired, PasswordLastSet, pwdLastSet, SamAccountName, UserPrincipalName, Title, Office, telephoneNumber, `
     @{label = 'MemberOf'; expression = { ($_.MemberOf | ForEach-Object { (Get-ADGroup $_).Name } | Sort-Object) -join "`n" } } | Format-List
-    
+
 }function Show-SubMenuSearchUser {
     while ($true) {
 
@@ -394,7 +426,7 @@ function Get-ADUserInfo {
             }
             Default {
                 main
-                Write-Host "Invalid option, please try again" 
+                Write-Host "Invalid option, please try again"
             }
         }
     }
@@ -423,12 +455,12 @@ function Show-ExhangeMenu {
                     Pause
                     Show-ExhangeMenu
                 }
-            } 
+            }
             "2" {  }
             "3" {
                 Get-Command -Module ExchangeOnlineManagement | Out-GridView
                 Pause
-                Show-ExhangeMenu 
+                Show-ExhangeMenu
             }
             "4" { main }
             Default { main }
@@ -445,7 +477,7 @@ function main {
         New-Menu -title "Main Menu" -options @("Search User", "Get User Info", "Search AD Accounts", "Search AD Groups", "Custom Command", "ExchangeModule", "Quit")
 
         $value = Read-Host "Make a selection, (default is `"1`")"
-        
+
         switch ($value) {
             "1" {
                 Clear-Host
@@ -474,7 +506,7 @@ function main {
             Default {
                 Clear-Host
                 Show-SubMenuSearchUser
-                Write-Host "Invalid option, please try again" 
+                Write-Host "Invalid option, please try again"
             }
         }
     }
